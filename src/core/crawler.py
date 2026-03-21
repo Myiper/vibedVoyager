@@ -296,6 +296,7 @@ class CrawlManager:
                 self._process_task(task)
                 self._store.mark_frontier_state(task.run_id, task.url, "done")
             except Exception as exc:  # pragma: no cover
+                self._record_event(task.run_id, "failed", task.url, task.depth, error=str(exc))
                 # Storage rows may be removed concurrently (e.g., run deletion/stop).
                 # Never let worker threads die because bookkeeping writes fail.
                 try:
@@ -358,7 +359,7 @@ class CrawlManager:
         if context is None:
             raise RuntimeError(f"missing run context: {task.run_id}")
         attempt = 0
-        last_exc: Exception | None = None
+        last_error_message = "unknown error"
         while attempt <= self._max_retries:
             try:
                 context.limiter.acquire()
@@ -372,13 +373,31 @@ class CrawlManager:
                     html = raw.decode(encoding, errors="replace")
                     final_url = normalize_url(response.geturl()) or task.url
                     return html, final_url
-            except (HTTPError, URLError, TimeoutError, ValueError) as exc:
-                last_exc = exc
+            except HTTPError as exc:
+                last_error_message = f"http error {exc.code} {exc.reason}"
                 if attempt == self._max_retries:
                     break
                 time.sleep(0.25 * (2**attempt))
                 attempt += 1
-        raise RuntimeError(f"fetch failed for {task.url}: {last_exc}")
+            except URLError as exc:
+                last_error_message = f"network error {exc.reason}"
+                if attempt == self._max_retries:
+                    break
+                time.sleep(0.25 * (2**attempt))
+                attempt += 1
+            except TimeoutError:
+                last_error_message = "request timed out"
+                if attempt == self._max_retries:
+                    break
+                time.sleep(0.25 * (2**attempt))
+                attempt += 1
+            except ValueError as exc:
+                last_error_message = str(exc)
+                if attempt == self._max_retries:
+                    break
+                time.sleep(0.25 * (2**attempt))
+                attempt += 1
+        raise RuntimeError(f"fetch failed for {task.url}: {last_error_message}")
 
     def _extract_text(self, html: str) -> str:
         cleaned = []
@@ -438,7 +457,7 @@ class CrawlManager:
                 self._queue.all_tasks_done.notify_all()
             return removed
 
-    def _record_event(self, run_id: str, event_type: str, url: str, depth: int) -> None:
+    def _record_event(self, run_id: str, event_type: str, url: str, depth: int, error: str | None = None) -> None:
         with self._events_lock:
             self._events.append(
                 {
@@ -447,6 +466,7 @@ class CrawlManager:
                     "event": event_type,
                     "url": url,
                     "depth": int(depth),
+                    "error": error,
                 }
             )
 

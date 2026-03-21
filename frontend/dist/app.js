@@ -205,6 +205,7 @@ function SearchPage({ runs }) {
 function StatusPage({ runs, refreshRuns }) {
   const [controlMessage, setControlMessage] = React.useState("");
   const [events, setEvents] = React.useState([]);
+  const [eventsError, setEventsError] = React.useState("");
   const [clearedAt, setClearedAt] = React.useState(() => loadStoredNumber("status.consoleClearedAt", 0));
 
   async function action(runId, op) {
@@ -241,8 +242,11 @@ function StatusPage({ runs, refreshRuns }) {
     const params = new URLSearchParams({ limit: "5000" });
     if (selectedRunId) params.set("run_id", selectedRunId);
     api(`/events?${params.toString()}`)
-      .then((payload) => setEvents(payload.events || []))
-      .catch(() => undefined);
+      .then((payload) => {
+        setEvents(payload.events || []);
+        setEventsError("");
+      })
+      .catch((err) => setEventsError(err.message || "failed to load events"));
   }, 1200);
   React.useEffect(() => {
     try {
@@ -252,15 +256,27 @@ function StatusPage({ runs, refreshRuns }) {
     }
   }, [clearedAt]);
   const visibleEvents = events.filter((entry) => Number(entry.ts || 0) >= clearedAt);
+  const errorEvents = visibleEvents.filter((entry) => String(entry.event || "").toLowerCase() === "failed");
+  const latestErrorEvent = errorEvents.length ? errorEvents[errorEvents.length - 1] : null;
 
   const runningRuns = runs.filter((run) => run.status === "active" || run.status === "paused");
+  const failedRuns = runs.filter((run) => run.status === "failed");
   const now = new Date();
   const timestamp = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}:${String(now.getSeconds()).padStart(2, "0")}`;
   const monitorLines = [
     `[${timestamp}] Crawl Monitor`,
-    `Total runs: ${runs.length} | Running: ${runningRuns.length}`,
+    `Total runs: ${runs.length} | Running: ${runningRuns.length} | Failed: ${failedRuns.length}`,
     "------------------------------------------------------------",
   ];
+  if (eventsError) {
+    monitorLines.push(`UI event stream error: ${eventsError}`);
+    monitorLines.push("------------------------------------------------------------");
+  }
+  if (latestErrorEvent) {
+    monitorLines.push(`LATEST CRAWL ERROR: ${latestErrorEvent.error || "unknown failure"}`);
+    monitorLines.push(`  URL: ${latestErrorEvent.url || "n/a"}`);
+    monitorLines.push("------------------------------------------------------------");
+  }
 
   if (!runningRuns.length) {
     monitorLines.push("No active crawl right now.");
@@ -280,7 +296,7 @@ function StatusPage({ runs, refreshRuns }) {
       monitorLines.push("------------------------------------------------------------");
     }
   }
-  monitorLines.push("Event Stream (queued + visited):");
+  monitorLines.push("Event Stream (queued + visited + failed):");
   if (!visibleEvents.length) {
     monitorLines.push("  no event yet");
   } else {
@@ -293,7 +309,8 @@ function StatusPage({ runs, refreshRuns }) {
       const urlPart = entry.url || "n/a";
       const depthPart = Number(entry.depth || 0);
       const typePart = String(entry.event || "event").toUpperCase();
-      monitorLines.push(`[${t}] [${runPart}] ${typePart} depth=${depthPart} ${urlPart}`);
+      const errorPart = entry.error ? ` | error: ${entry.error}` : "";
+      monitorLines.push(`[${t}] [${runPart}] ${typePart} depth=${depthPart} ${urlPart}${errorPart}`);
     }
   }
 

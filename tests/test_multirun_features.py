@@ -39,6 +39,35 @@ class MultiRunFixtureHandler(BaseHTTPRequestHandler):
         return
 
 
+class DeniedRequestFixtureHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:  # noqa: N802
+        if self.path == "/":
+            body = '<html><body>root <a href="/blocked">blocked</a></body></html>'.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path == "/blocked":
+            body = b"forbidden"
+            self.send_response(403)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        body = b"missing"
+        self.send_response(404)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt: str, *args: object) -> None:
+        return
+
+
 def _wait_until(predicate, timeout: float = 8.0) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -253,6 +282,53 @@ def test_api_events_endpoint(tmp_path: Path) -> None:
     assert events_status == 200
     assert isinstance(events_payload.get("events"), list)
     assert any(item.get("event") in {"queued", "visited"} for item in events_payload["events"])
+
+    api_server.stop()
+    manager.shutdown()
+    store.close()
+    fixture.shutdown()
+    fixture.server_close()
+
+
+def test_events_capture_denied_requests(tmp_path: Path) -> None:
+    fixture = ThreadingHTTPServer(("127.0.0.1", 0), DeniedRequestFixtureHandler)
+    fixture_thread = threading.Thread(target=fixture.serve_forever, daemon=True)
+    fixture_thread.start()
+    fixture_host, fixture_port = fixture.server_address
+
+    store = IndexStore(tmp_path / "api-denied.db")
+    manager = CrawlManager(store=store, workers=2, queue_maxsize=32, requests_per_second=30.0, burst=10)
+    manager.start()
+    api_server = NativeSearchServer(manager=manager, host="127.0.0.1", port=0, web_root=Path("web"))
+    api_server.start(blocking=False)
+    assert api_server._server is not None
+    api_host, api_port = api_server._server.server_address
+
+    status, created = _request(
+        "POST",
+        api_host,
+        int(api_port),
+        "/index",
+        {
+            "origin": f"http://{fixture_host}:{fixture_port}/",
+            "k": 1,
+            "hit_rate": 10,
+            "queue_capacity": 100,
+            "max_urls": 20,
+        },
+    )
+    assert status == 202
+    run_id = created["run_id"]
+
+    denied_event_seen = _wait_until(
+        lambda: any(
+            "http error 403" in str(item.get("error", "")).lower()
+            for item in _request("GET", api_host, int(api_port), f"/events?run_id={run_id}&limit=500")[1].get("events", [])
+            if item.get("event") == "failed"
+        ),
+        timeout=6.0,
+    )
+    assert denied_event_seen
 
     api_server.stop()
     manager.shutdown()
