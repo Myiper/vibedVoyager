@@ -33,6 +33,18 @@ function loadStoredInteger(key, fallback) {
   }
 }
 
+function loadStoredNumber(key, fallback) {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (raw === null) return fallback;
+    const parsed = Number.parseFloat(raw);
+    if (Number.isNaN(parsed) || parsed < 0) return fallback;
+    return parsed;
+  } catch (_err) {
+    return fallback;
+  }
+}
+
 function StatusPill({ status }) {
   const className = `pill ${status || ""}`;
   return e("span", { className }, status || "unknown");
@@ -193,7 +205,7 @@ function SearchPage({ runs }) {
 function StatusPage({ runs, refreshRuns }) {
   const [controlMessage, setControlMessage] = React.useState("");
   const [events, setEvents] = React.useState([]);
-  const [clearedAt, setClearedAt] = React.useState(0);
+  const [clearedAt, setClearedAt] = React.useState(() => loadStoredNumber("status.consoleClearedAt", 0));
 
   async function action(runId, op) {
     await api(`/runs/${runId}/${op}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
@@ -232,6 +244,13 @@ function StatusPage({ runs, refreshRuns }) {
       .then((payload) => setEvents(payload.events || []))
       .catch(() => undefined);
   }, 1200);
+  React.useEffect(() => {
+    try {
+      window.localStorage.setItem("status.consoleClearedAt", String(clearedAt));
+    } catch (_err) {
+      // Ignore storage failures.
+    }
+  }, [clearedAt]);
   const visibleEvents = events.filter((entry) => Number(entry.ts || 0) >= clearedAt);
 
   const runningRuns = runs.filter((run) => run.status === "active" || run.status === "paused");
