@@ -172,7 +172,16 @@ function SearchPage({ runs }) {
       { className: "result-list", key: "results" },
       results.map((row, idx) =>
         e("div", { className: "result-item", key: idx }, [
-          e("div", { key: "u" }, row[0]),
+          e(
+            "a",
+            {
+              key: "u",
+              href: row[0],
+              target: "_blank",
+              rel: "noopener noreferrer",
+            },
+            row[0]
+          ),
           e("div", { className: "muted", key: "meta" }, `origin: ${row[1]} | depth: ${row[2]}`),
         ])
       )
