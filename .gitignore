@@ -215,3 +215,4 @@ data/*.db-shm
 /data/native_search.db
 .vscode
 /data/
+.cursor/
