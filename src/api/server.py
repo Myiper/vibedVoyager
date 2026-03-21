@@ -33,6 +33,19 @@ class NativeSearchHandler(BaseHTTPRequestHandler):
             run_id = parsed.path.split("/")[2]
             self._json_response(HTTPStatus.OK, self.manager.run_statistics(run_id=run_id))
             return
+        if parsed.path == "/events":
+            params = parse_qs(parsed.query)
+            run_id = params.get("run_id", [""])[0].strip() or None
+            try:
+                limit = int(params.get("limit", ["500"])[0])
+            except ValueError:
+                self._json_response(HTTPStatus.BAD_REQUEST, {"error": "limit must be integer"})
+                return
+            self._json_response(
+                HTTPStatus.OK,
+                {"events": self.manager.recent_events(limit=limit, run_id=run_id)},
+            )
+            return
         if parsed.path == "/search":
             params = parse_qs(parsed.query)
             query = params.get("q", [""])[0]

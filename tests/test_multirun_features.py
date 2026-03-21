@@ -212,3 +212,51 @@ def test_api_stop_all_endpoint(tmp_path: Path) -> None:
     fixture.shutdown()
     fixture.server_close()
 
+
+def test_api_events_endpoint(tmp_path: Path) -> None:
+    fixture = ThreadingHTTPServer(("127.0.0.1", 0), MultiRunFixtureHandler)
+    fixture_thread = threading.Thread(target=fixture.serve_forever, daemon=True)
+    fixture_thread.start()
+    fixture_host, fixture_port = fixture.server_address
+
+    store = IndexStore(tmp_path / "api-events.db")
+    manager = CrawlManager(store=store, workers=2, queue_maxsize=32, requests_per_second=30.0, burst=10)
+    manager.start()
+    api_server = NativeSearchServer(manager=manager, host="127.0.0.1", port=0, web_root=Path("web"))
+    api_server.start(blocking=False)
+    assert api_server._server is not None
+    api_host, api_port = api_server._server.server_address
+
+    status, created = _request(
+        "POST",
+        api_host,
+        int(api_port),
+        "/index",
+        {
+            "origin": f"http://{fixture_host}:{fixture_port}/site1",
+            "k": 1,
+            "hit_rate": 10,
+            "queue_capacity": 100,
+            "max_urls": 20,
+        },
+    )
+    assert status == 202
+    run_id = created["run_id"]
+
+    events_ready = _wait_until(
+        lambda: len(_request("GET", api_host, int(api_port), f"/events?run_id={run_id}&limit=200")[1].get("events", [])) > 0,
+        timeout=5.0,
+    )
+    assert events_ready
+
+    events_status, events_payload = _request("GET", api_host, int(api_port), f"/events?run_id={run_id}&limit=200")
+    assert events_status == 200
+    assert isinstance(events_payload.get("events"), list)
+    assert any(item.get("event") in {"queued", "visited"} for item in events_payload["events"])
+
+    api_server.stop()
+    manager.shutdown()
+    store.close()
+    fixture.shutdown()
+    fixture.server_close()
+

@@ -181,11 +181,9 @@ function SearchPage({ runs }) {
 }
 
 function StatusPage({ runs, refreshRuns }) {
-  const [stats, setStats] = React.useState({ runs: [] });
   const [controlMessage, setControlMessage] = React.useState("");
-  useInterval(() => {
-    api("/stats").then(setStats).catch(() => undefined);
-  }, 2500);
+  const [events, setEvents] = React.useState([]);
+  const [clearedAt, setClearedAt] = React.useState(0);
 
   async function action(runId, op) {
     await api(`/runs/${runId}/${op}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
@@ -213,6 +211,60 @@ function StatusPage({ runs, refreshRuns }) {
       refreshRuns();
     } catch (err) {
       setControlMessage(err.message);
+    }
+  }
+
+  const selectedRunId = runs.length === 1 ? runs[0].run_id : "";
+  useInterval(() => {
+    const params = new URLSearchParams({ limit: "5000" });
+    if (selectedRunId) params.set("run_id", selectedRunId);
+    api(`/events?${params.toString()}`)
+      .then((payload) => setEvents(payload.events || []))
+      .catch(() => undefined);
+  }, 1200);
+  const visibleEvents = events.filter((entry) => Number(entry.ts || 0) >= clearedAt);
+
+  const runningRuns = runs.filter((run) => run.status === "active" || run.status === "paused");
+  const now = new Date();
+  const timestamp = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}:${String(now.getSeconds()).padStart(2, "0")}`;
+  const monitorLines = [
+    `[${timestamp}] Crawl Monitor`,
+    `Total runs: ${runs.length} | Running: ${runningRuns.length}`,
+    "------------------------------------------------------------",
+  ];
+
+  if (!runningRuns.length) {
+    monitorLines.push("No active crawl right now.");
+    monitorLines.push("Start a new crawl from Start page to view live details.");
+  } else {
+    for (const run of runningRuns) {
+      const discovered = Number(run.urls_discovered || 0);
+      const processed = Number(run.urls_processed || 0);
+      const queued = Number((run.frontier && run.frontier.queued) || 0);
+      const maxUrls = Number(run.max_urls || 0);
+      const progress = maxUrls > 0 ? `${Math.min(100, Math.round((discovered / maxUrls) * 100))}%` : "n/a";
+      monitorLines.push(`Run ${String(run.run_id || "").slice(0, 8)} | ${run.status.toUpperCase()}`);
+      monitorLines.push(`  Origin      : ${run.origin_url || "n/a"}`);
+      monitorLines.push(`  Progress    : ${discovered}/${maxUrls} discovered (${progress}), ${processed} processed`);
+      monitorLines.push(`  Queue       : ${queued} queued | capacity ${run.queue_capacity ?? "n/a"}`);
+      monitorLines.push(`  Throttle    : ${run.hit_rate ?? "n/a"} req/s`);
+      monitorLines.push("------------------------------------------------------------");
+    }
+  }
+  monitorLines.push("Event Stream (queued + visited):");
+  if (!visibleEvents.length) {
+    monitorLines.push("  no event yet");
+  } else {
+    const start = Math.max(0, visibleEvents.length - 300);
+    for (let i = start; i < visibleEvents.length; i += 1) {
+      const entry = visibleEvents[i];
+      const eventDate = new Date((entry.ts || 0) * 1000);
+      const t = `${String(eventDate.getHours()).padStart(2, "0")}:${String(eventDate.getMinutes()).padStart(2, "0")}:${String(eventDate.getSeconds()).padStart(2, "0")}`;
+      const runPart = String(entry.run_id || "").slice(0, 8);
+      const urlPart = entry.url || "n/a";
+      const depthPart = Number(entry.depth || 0);
+      const typePart = String(entry.event || "event").toUpperCase();
+      monitorLines.push(`[${t}] [${runPart}] ${typePart} depth=${depthPart} ${urlPart}`);
     }
   }
 
@@ -246,15 +298,12 @@ function StatusPage({ runs, refreshRuns }) {
         ),
       ]),
     ]),
-    e("div", { className: "card", key: "stats" }, [
-      e("h2", { key: "title" }, "Database Analytics"),
-      e("div", { className: "grid", key: "grid" }, (stats.runs || []).slice(0, 6).map((entry) =>
-        e("div", { className: "metric", key: entry.summary.run_id }, [
-          e("div", { className: "label", key: "lbl" }, entry.summary.origin_url),
-          e("div", { className: "value", key: "val" }, String(entry.summary.urls_processed || 0)),
-          e("div", { className: "muted", key: "meta" }, `processed | dead letters: ${entry.dead_letters}`),
-        ])
-      )),
+    e("div", { className: "card", key: "monitor" }, [
+      e("div", { key: "monitor-title-row", style: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: "10px", flexWrap: "wrap" } }, [
+        e("h2", { key: "title" }, "Crawl Runtime Console"),
+        e("button", { key: "clear-console", className: "alt", onClick: () => { setClearedAt(Date.now() / 1000); setEvents([]); } }, "Clear Console"),
+      ]),
+      e("pre", { className: "crawl-console", key: "console" }, monitorLines.join("\n")),
     ]),
   ]);
 }

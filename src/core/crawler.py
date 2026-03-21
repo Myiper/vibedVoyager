@@ -56,6 +56,8 @@ class CrawlManager:
         self._active_jobs = 0
         self._active_jobs_lock = threading.Lock()
         self._run_contexts: dict[str, RunContext] = {}
+        self._events_lock = threading.Lock()
+        self._events: deque[dict[str, Any]] = deque(maxlen=20000)
         self._default_rps = requests_per_second
         self._default_queue_capacity = queue_maxsize
         self._booted = False
@@ -172,6 +174,14 @@ class CrawlManager:
     def run_statistics(self, run_id: str | None = None) -> dict:
         return self._store.run_statistics(run_id=run_id)
 
+    def recent_events(self, limit: int = 500, run_id: str | None = None) -> list[dict[str, Any]]:
+        bounded = max(1, min(limit, 5000))
+        with self._events_lock:
+            items = list(self._events)
+        if run_id:
+            items = [event for event in items if str(event.get("run_id")) == run_id]
+        return items[-bounded:]
+
     def stop_all(self) -> dict[str, int]:
         run_ids = [
             str(run["run_id"])
@@ -248,6 +258,7 @@ class CrawlManager:
         self._store.add_or_update_frontier(
             task.run_id, task.origin_url, task.url, task.depth, task.max_depth, status="queued"
         )
+        self._record_event(task.run_id, "queued", task.url, task.depth)
         self._enqueue_task(task)
         return True
 
@@ -315,6 +326,7 @@ class CrawlManager:
             title=title,
             content=text,
         )
+        self._record_event(task.run_id, "visited", page_url, task.depth)
 
         if task.depth >= task.max_depth:
             return
@@ -417,4 +429,16 @@ class CrawlManager:
             if self._queue.unfinished_tasks == 0:
                 self._queue.all_tasks_done.notify_all()
             return removed
+
+    def _record_event(self, run_id: str, event_type: str, url: str, depth: int) -> None:
+        with self._events_lock:
+            self._events.append(
+                {
+                    "ts": time.time(),
+                    "run_id": run_id,
+                    "event": event_type,
+                    "url": url,
+                    "depth": int(depth),
+                }
+            )
 

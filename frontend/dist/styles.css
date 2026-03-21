@@ -53,3 +53,17 @@ button.warn { background: #7f1d1d; border-color: #ef4444; }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .result-list { display: grid; gap: 8px; }
 .result-item { border: 1px solid #334155; padding: 10px; border-radius: 10px; background: #0b1220; }
+.crawl-console {
+  margin: 0;
+  padding: 14px;
+  min-height: 220px;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  background: #050b16;
+  color: #bbf7d0;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow: auto;
+}
