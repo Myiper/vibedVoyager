@@ -296,8 +296,16 @@ class CrawlManager:
                 self._process_task(task)
                 self._store.mark_frontier_state(task.run_id, task.url, "done")
             except Exception as exc:  # pragma: no cover
-                self._store.mark_frontier_state(task.run_id, task.url, "failed", error=str(exc))
-                self._store.record_failure(task.run_id, task.url, task.depth, str(exc))
+                # Storage rows may be removed concurrently (e.g., run deletion/stop).
+                # Never let worker threads die because bookkeeping writes fail.
+                try:
+                    self._store.mark_frontier_state(task.run_id, task.url, "failed", error=str(exc))
+                except Exception:
+                    pass
+                try:
+                    self._store.record_failure(task.run_id, task.url, task.depth, str(exc))
+                except Exception:
+                    pass
             finally:
                 with self._active_jobs_lock:
                     self._active_jobs -= 1

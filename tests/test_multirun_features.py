@@ -196,7 +196,7 @@ def test_api_stop_all_endpoint(tmp_path: Path) -> None:
     run_id = created["run_id"]
     assert _wait_until(lambda: any(run["run_id"] == run_id for run in manager.list_runs()))
 
-    stop_status, stop_payload = _request("POST", api_host, int(api_port), "/control/stop", {})
+    stop_status, stop_payload = _request("POST", api_host, int(api_port), "/control/stop", {"confirm_stop": True})
     assert stop_status == 200
     assert stop_payload["status"] == "stopped"
     assert int(stop_payload["stopped_runs"]) >= 1

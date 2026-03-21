@@ -122,6 +122,15 @@ class NativeSearchHandler(BaseHTTPRequestHandler):
             self._json_response(HTTPStatus.OK, {"status": "active", "run_id": run_id})
             return
         if parsed.path == "/control/stop":
+            payload = self._read_json()
+            if payload is None:
+                return
+            if payload.get("confirm_stop") is not True:
+                self._json_response(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": "confirm_stop=true is required"},
+                )
+                return
             result = self.manager.stop_all()
             self._json_response(HTTPStatus.OK, {"status": "stopped", **result})
             return

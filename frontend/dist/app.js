@@ -214,7 +214,7 @@ function StatusPage({ runs, refreshRuns }) {
       const payload = await api("/control/stop", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: "{}",
+        body: JSON.stringify({ confirm_stop: true }),
       });
       setControlMessage(`Stopped ${payload.stopped_runs || 0} run(s), dropped ${payload.dropped_tasks || 0} queued task(s).`);
       refreshRuns();
@@ -281,7 +281,7 @@ function StatusPage({ runs, refreshRuns }) {
     e("div", { className: "card", key: "run-table" }, [
       e("div", { key: "title-row", style: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: "10px", flexWrap: "wrap" } }, [
         e("h2", { key: "title" }, "Run Status"),
-        e("button", { key: "stop-all", className: "warn", onClick: stopAll }, "Stop Crawling"),
+        e("button", { key: "stop-all", type: "button", className: "warn", onClick: stopAll }, "Stop Crawling"),
       ]),
       controlMessage ? e("p", { key: "stop-message", className: "muted" }, controlMessage) : null,
       e("table", { className: "table", key: "table" }, [
@@ -298,9 +298,9 @@ function StatusPage({ runs, refreshRuns }) {
               e("td", { key: "p" }, String(run.urls_processed || 0)),
               e("td", { key: "q" }, String((run.frontier && run.frontier.queued) || 0)),
               e("td", { key: "a" }, e("div", { className: "actions" }, [
-                e("button", { key: "pause", className: "alt", onClick: () => action(run.run_id, "pause") }, "Pause"),
-                e("button", { key: "resume", className: "alt", onClick: () => action(run.run_id, "resume") }, "Resume"),
-                e("button", { key: "delete", className: "warn", onClick: () => remove(run.run_id) }, "Delete"),
+                e("button", { key: "pause", type: "button", className: "alt", onClick: () => action(run.run_id, "pause") }, "Pause"),
+                e("button", { key: "resume", type: "button", className: "alt", onClick: () => action(run.run_id, "resume") }, "Resume"),
+                e("button", { key: "delete", type: "button", className: "warn", onClick: () => remove(run.run_id) }, "Delete"),
               ])),
             ])
           )
@@ -310,7 +310,7 @@ function StatusPage({ runs, refreshRuns }) {
     e("div", { className: "card", key: "monitor" }, [
       e("div", { key: "monitor-title-row", style: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: "10px", flexWrap: "wrap" } }, [
         e("h2", { key: "title" }, "Crawl Runtime Console"),
-        e("button", { key: "clear-console", className: "alt", onClick: () => { setClearedAt(Date.now() / 1000); setEvents([]); } }, "Clear Console"),
+        e("button", { key: "clear-console", type: "button", className: "alt", onClick: () => { setClearedAt(Date.now() / 1000); setEvents([]); } }, "Clear Console"),
       ]),
       e("pre", { className: "crawl-console", key: "console" }, monitorLines.join("\n")),
     ]),
