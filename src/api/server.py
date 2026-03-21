@@ -108,6 +108,10 @@ class NativeSearchHandler(BaseHTTPRequestHandler):
             self.manager.resume(run_id)
             self._json_response(HTTPStatus.OK, {"status": "active", "run_id": run_id})
             return
+        if parsed.path == "/control/stop":
+            result = self.manager.stop_all()
+            self._json_response(HTTPStatus.OK, {"status": "stopped", **result})
+            return
         self._json_response(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
     def do_DELETE(self) -> None:  # noqa: N802

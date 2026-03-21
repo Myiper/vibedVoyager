@@ -119,6 +119,7 @@ function SearchPage({ runs }) {
 
 function StatusPage({ runs, refreshRuns }) {
   const [stats, setStats] = React.useState({ runs: [] });
+  const [controlMessage, setControlMessage] = React.useState("");
   useInterval(() => {
     api("/stats").then(setStats).catch(() => undefined);
   }, 2500);
@@ -137,9 +138,28 @@ function StatusPage({ runs, refreshRuns }) {
     }
   }
 
+  async function stopAll() {
+    if (!window.confirm("Stop all active crawls? This cannot be undone.")) return;
+    try {
+      const payload = await api("/control/stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      setControlMessage(`Stopped ${payload.stopped_runs || 0} run(s), dropped ${payload.dropped_tasks || 0} queued task(s).`);
+      refreshRuns();
+    } catch (err) {
+      setControlMessage(err.message);
+    }
+  }
+
   return e("div", null, [
     e("div", { className: "card", key: "run-table" }, [
-      e("h2", { key: "title" }, "Run Status"),
+      e("div", { key: "title-row", style: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: "10px", flexWrap: "wrap" } }, [
+        e("h2", { key: "title" }, "Run Status"),
+        e("button", { key: "stop-all", className: "warn", onClick: stopAll }, "Stop Crawling"),
+      ]),
+      controlMessage ? e("p", { key: "stop-message", className: "muted" }, controlMessage) : null,
       e("table", { className: "table", key: "table" }, [
         e("thead", { key: "h" }, e("tr", null, ["Origin", "Run ID", "Status", "Discovered", "Processed", "Queued", "Actions"].map((h) => e("th", { key: h }, h)))),
         e(

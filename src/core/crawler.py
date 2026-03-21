@@ -3,6 +3,7 @@ from __future__ import annotations
 import queue
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -170,6 +171,32 @@ class CrawlManager:
 
     def run_statistics(self, run_id: str | None = None) -> dict:
         return self._store.run_statistics(run_id=run_id)
+
+    def stop_all(self) -> dict[str, int]:
+        run_ids = [
+            str(run["run_id"])
+            for run in self._store.list_runs()
+            if str(run.get("status", "")).strip() in {"active", "paused"}
+        ]
+        if not run_ids:
+            return {"stopped_runs": 0, "dropped_tasks": 0}
+
+        for run_id in run_ids:
+            self._store.mark_run_status(run_id, "stopped")
+        self._store.mark_frontier_for_runs(
+            run_ids=run_ids,
+            from_statuses=("queued", "in_progress"),
+            to_status="failed",
+            error="stopped by user",
+        )
+
+        for run_id in run_ids:
+            self._run_contexts.pop(run_id, None)
+        with self._visited_lock:
+            stopped_set = set(run_ids)
+            self._visited = {item for item in self._visited if item[0] not in stopped_set}
+        dropped_tasks = self._drop_buffered_tasks_for_runs(set(run_ids))
+        return {"stopped_runs": len(run_ids), "dropped_tasks": dropped_tasks}
 
     def _restore_recovery_state(self) -> None:
         for run in self._store.list_runs():
@@ -374,4 +401,20 @@ class CrawlManager:
     def _has_buffered_tasks(self, run_id: str) -> bool:
         with self._queue.mutex:
             return any(task.run_id == run_id for task in list(self._queue.queue))
+
+    def _drop_buffered_tasks_for_runs(self, run_ids: set[str]) -> int:
+        if not run_ids:
+            return 0
+        with self._queue.mutex:
+            queued_tasks = list(self._queue.queue)
+            kept_tasks = [task for task in queued_tasks if task.run_id not in run_ids]
+            removed = len(queued_tasks) - len(kept_tasks)
+            if removed <= 0:
+                return 0
+            self._queue.queue = deque(kept_tasks)
+            self._queue.unfinished_tasks = max(0, self._queue.unfinished_tasks - removed)
+            self._queue.not_full.notify_all()
+            if self._queue.unfinished_tasks == 0:
+                self._queue.all_tasks_done.notify_all()
+            return removed
 

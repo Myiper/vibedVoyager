@@ -47,6 +47,7 @@ button.warn { background: #7f1d1d; border-color: #ef4444; }
 .pill.active { background: #14532d; color: #86efac; }
 .pill.paused { background: #78350f; color: #fcd34d; }
 .pill.completed { background: #1e3a8a; color: #93c5fd; }
+.pill.stopped { background: #7c2d12; color: #fed7aa; }
 .pill.failed { background: #7f1d1d; color: #fca5a5; }
 .muted { color: #94a3b8; }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; }

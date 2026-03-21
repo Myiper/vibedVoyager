@@ -412,6 +412,30 @@ class IndexStore:
             result[run_id][str(row["status"])] = int(row["count"])
         return result
 
+    def mark_frontier_for_runs(
+        self,
+        run_ids: list[str],
+        from_statuses: tuple[str, ...],
+        to_status: str,
+        error: str | None = None,
+    ) -> int:
+        if not run_ids or not from_statuses:
+            return 0
+        run_placeholders = ",".join("?" for _ in run_ids)
+        status_placeholders = ",".join("?" for _ in from_statuses)
+        now = time.time()
+        with self._write_lock, self._conn:
+            cur = self._conn.execute(
+                f"""
+                UPDATE frontier
+                SET status=?, updated_at=?, last_error=?
+                WHERE run_id IN ({run_placeholders})
+                  AND status IN ({status_placeholders})
+                """,
+                [to_status, now, error, *run_ids, *from_statuses],
+            )
+        return int(cur.rowcount)
+
     def delete_run(self, run_id: str) -> bool:
         with self._write_lock, self._conn:
             cur = self._conn.execute("DELETE FROM crawl_runs WHERE run_id=?", (run_id,))

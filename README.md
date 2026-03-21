@@ -55,6 +55,8 @@ python main.py --host 127.0.0.1 --port 8080
   - run-scoped status snapshot
 - `POST /runs/{run_id}/pause`
 - `POST /runs/{run_id}/resume`
+- `POST /control/stop`
+  - force-stops all active/paused runs and drains queued crawl tasks
 - `DELETE /runs/{run_id}`
   - deletes run data (active/paused runs are rejected)
 - `GET /stats`
