@@ -19,27 +19,33 @@ class NativeSearchHandler(BaseHTTPRequestHandler):
         if parsed.path == "/status":
             self._json_response(HTTPStatus.OK, self.manager.status())
             return
+        if parsed.path == "/runs":
+            self._json_response(HTTPStatus.OK, {"runs": self.manager.list_runs()})
+            return
+        if parsed.path.startswith("/runs/") and parsed.path.endswith("/status"):
+            run_id = parsed.path.split("/")[2]
+            self._json_response(HTTPStatus.OK, self.manager.status(run_id=run_id))
+            return
+        if parsed.path == "/stats":
+            self._json_response(HTTPStatus.OK, self.manager.run_statistics())
+            return
+        if parsed.path.startswith("/runs/") and parsed.path.endswith("/stats"):
+            run_id = parsed.path.split("/")[2]
+            self._json_response(HTTPStatus.OK, self.manager.run_statistics(run_id=run_id))
+            return
         if parsed.path == "/search":
             params = parse_qs(parsed.query)
             query = params.get("q", [""])[0]
+            run_id = params.get("run_id", [""])[0].strip() or None
             try:
                 limit = int(params.get("limit", ["50"])[0])
             except ValueError:
                 self._json_response(HTTPStatus.BAD_REQUEST, {"error": "limit must be integer"})
                 return
-            rows = self.manager.search(query=query, limit=max(1, min(limit, 200)))
-            self._json_response(HTTPStatus.OK, {"query": query, "results": rows})
+            rows = self.manager.search(query=query, limit=max(1, min(limit, 200)), run_id=run_id)
+            self._json_response(HTTPStatus.OK, {"query": query, "run_id": run_id, "results": rows})
             return
-        if parsed.path in {"/", "/index.html"}:
-            self._serve_static("index.html", content_type="text/html; charset=utf-8")
-            return
-        if parsed.path == "/app.js":
-            self._serve_static("app.js", content_type="application/javascript; charset=utf-8")
-            return
-        if parsed.path == "/styles.css":
-            self._serve_static("styles.css", content_type="text/css; charset=utf-8")
-            return
-        self._json_response(HTTPStatus.NOT_FOUND, {"error": "not found"})
+        self._serve_spa(parsed.path)
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
@@ -54,23 +60,69 @@ class NativeSearchHandler(BaseHTTPRequestHandler):
             except ValueError:
                 self._json_response(HTTPStatus.BAD_REQUEST, {"error": "k must be integer"})
                 return
+            hit_rate = payload.get("hit_rate")
+            queue_capacity = payload.get("queue_capacity")
+            max_urls = payload.get("max_urls", 10000)
+            try:
+                hit_rate_value = float(hit_rate) if hit_rate is not None else None
+                queue_capacity_value = int(queue_capacity) if queue_capacity is not None else None
+                max_urls_value = int(max_urls)
+            except ValueError:
+                self._json_response(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": "hit_rate must be float, queue_capacity and max_urls must be integers"},
+                )
+                return
             if max_depth < 0:
                 self._json_response(HTTPStatus.BAD_REQUEST, {"error": "k must be >= 0"})
                 return
+            if hit_rate_value is not None and hit_rate_value <= 0:
+                self._json_response(HTTPStatus.BAD_REQUEST, {"error": "hit_rate must be > 0"})
+                return
+            if queue_capacity_value is not None and queue_capacity_value <= 0:
+                self._json_response(HTTPStatus.BAD_REQUEST, {"error": "queue_capacity must be > 0"})
+                return
+            if max_urls_value <= 0:
+                self._json_response(HTTPStatus.BAD_REQUEST, {"error": "max_urls must be > 0"})
+                return
             try:
-                run_id = self.manager.start_index(origin=origin, max_depth=max_depth)
+                run_id = self.manager.start_index(
+                    origin=origin,
+                    max_depth=max_depth,
+                    hit_rate=hit_rate_value,
+                    queue_capacity=queue_capacity_value,
+                    max_urls=max_urls_value,
+                )
             except ValueError as exc:
                 self._json_response(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 return
             self._json_response(HTTPStatus.ACCEPTED, {"run_id": run_id})
             return
-        if parsed.path == "/control/pause":
-            self.manager.pause()
-            self._json_response(HTTPStatus.OK, {"status": "paused"})
+        if parsed.path.startswith("/runs/") and parsed.path.endswith("/pause"):
+            run_id = parsed.path.split("/")[2]
+            self.manager.pause(run_id)
+            self._json_response(HTTPStatus.OK, {"status": "paused", "run_id": run_id})
             return
-        if parsed.path == "/control/resume":
-            self.manager.resume()
-            self._json_response(HTTPStatus.OK, {"status": "active"})
+        if parsed.path.startswith("/runs/") and parsed.path.endswith("/resume"):
+            run_id = parsed.path.split("/")[2]
+            self.manager.resume(run_id)
+            self._json_response(HTTPStatus.OK, {"status": "active", "run_id": run_id})
+            return
+        self._json_response(HTTPStatus.NOT_FOUND, {"error": "not found"})
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        if parsed.path.startswith("/runs/"):
+            run_id = parsed.path.split("/")[2]
+            try:
+                deleted = self.manager.delete_run(run_id)
+            except ValueError as exc:
+                self._json_response(HTTPStatus.CONFLICT, {"error": str(exc)})
+                return
+            if deleted:
+                self._json_response(HTTPStatus.OK, {"deleted": True, "run_id": run_id})
+                return
+            self._json_response(HTTPStatus.NOT_FOUND, {"error": "run not found"})
             return
         self._json_response(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
@@ -109,6 +161,27 @@ class NativeSearchHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
+
+    def _serve_spa(self, request_path: str) -> None:
+        normalized = request_path.lstrip("/")
+        if not normalized:
+            self._serve_static("index.html", "text/html; charset=utf-8")
+            return
+        candidate = self.web_root / normalized
+        if candidate.is_file():
+            suffix = candidate.suffix
+            content_type = {
+                ".html": "text/html; charset=utf-8",
+                ".js": "application/javascript; charset=utf-8",
+                ".css": "text/css; charset=utf-8",
+                ".json": "application/json; charset=utf-8",
+                ".png": "image/png",
+                ".svg": "image/svg+xml",
+            }.get(suffix, "application/octet-stream")
+            self._serve_static(normalized, content_type)
+            return
+        # React Router fallback
+        self._serve_static("index.html", "text/html; charset=utf-8")
 
 
 class NativeSearchServer:

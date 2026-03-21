@@ -6,6 +6,7 @@ import time
 import uuid
 from collections import Counter
 from pathlib import Path
+from urllib.parse import urlparse
 
 from .utils import tokenize
 
@@ -34,7 +35,12 @@ class IndexStore:
                     status TEXT NOT NULL,
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
-                    processed_count INTEGER NOT NULL DEFAULT 0
+                    processed_count INTEGER NOT NULL DEFAULT 0,
+                    hit_rate REAL NOT NULL DEFAULT 5.0,
+                    queue_capacity INTEGER NOT NULL DEFAULT 5000,
+                    max_urls INTEGER NOT NULL DEFAULT 10000,
+                    urls_discovered INTEGER NOT NULL DEFAULT 0,
+                    urls_processed INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS frontier (
@@ -104,17 +110,45 @@ class IndexStore:
                 CREATE INDEX IF NOT EXISTS idx_frontier_status ON frontier(status);
                 """
             )
+        self._migrate_schema()
 
-    def create_run(self, origin_url: str, max_depth: int) -> str:
+    def _migrate_schema(self) -> None:
+        required = {
+            "hit_rate": "ALTER TABLE crawl_runs ADD COLUMN hit_rate REAL NOT NULL DEFAULT 5.0",
+            "queue_capacity": "ALTER TABLE crawl_runs ADD COLUMN queue_capacity INTEGER NOT NULL DEFAULT 5000",
+            "max_urls": "ALTER TABLE crawl_runs ADD COLUMN max_urls INTEGER NOT NULL DEFAULT 10000",
+            "urls_discovered": "ALTER TABLE crawl_runs ADD COLUMN urls_discovered INTEGER NOT NULL DEFAULT 0",
+            "urls_processed": "ALTER TABLE crawl_runs ADD COLUMN urls_processed INTEGER NOT NULL DEFAULT 0",
+        }
+        existing = {
+            str(row["name"])
+            for row in self._conn.execute("PRAGMA table_info(crawl_runs)").fetchall()
+        }
+        with self._conn:
+            for column_name, migration_sql in required.items():
+                if column_name not in existing:
+                    self._conn.execute(migration_sql)
+
+    def create_run(
+        self,
+        origin_url: str,
+        max_depth: int,
+        hit_rate: float = 5.0,
+        queue_capacity: int = 5000,
+        max_urls: int = 10000,
+    ) -> str:
         run_id = str(uuid.uuid4())
         now = time.time()
         with self._write_lock, self._conn:
             self._conn.execute(
                 """
-                INSERT INTO crawl_runs (run_id, origin_url, max_depth, status, created_at, updated_at)
-                VALUES (?, ?, ?, 'active', ?, ?)
+                INSERT INTO crawl_runs (
+                    run_id, origin_url, max_depth, status, created_at, updated_at,
+                    hit_rate, queue_capacity, max_urls
+                )
+                VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?)
                 """,
-                (run_id, origin_url, max_depth, now, now),
+                (run_id, origin_url, max_depth, now, now, hit_rate, queue_capacity, max_urls),
             )
         return run_id
 
@@ -125,6 +159,31 @@ class IndexStore:
                 "UPDATE crawl_runs SET status=?, updated_at=? WHERE run_id=?",
                 (status, now, run_id),
             )
+
+    def get_run(self, run_id: str) -> dict | None:
+        row = self._conn.execute(
+            """
+            SELECT
+                run_id, origin_url, max_depth, status, created_at, updated_at,
+                hit_rate, queue_capacity, max_urls, urls_discovered, urls_processed
+            FROM crawl_runs
+            WHERE run_id=?
+            """,
+            (run_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def list_runs(self) -> list[dict]:
+        rows = self._conn.execute(
+            """
+            SELECT
+                run_id, origin_url, max_depth, status, created_at, updated_at,
+                hit_rate, queue_capacity, max_urls, urls_discovered, urls_processed
+            FROM crawl_runs
+            ORDER BY created_at DESC
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def add_or_update_frontier(
         self, run_id: str, origin_url: str, url: str, depth: int, max_depth: int, status: str = "queued"
@@ -165,7 +224,17 @@ class IndexStore:
                 """,
                 (run_id, url, depth, now),
             )
-            return cur.rowcount > 0
+            inserted = cur.rowcount > 0
+            if inserted:
+                self._conn.execute(
+                    """
+                    UPDATE crawl_runs
+                    SET urls_discovered=urls_discovered + 1, updated_at=?
+                    WHERE run_id=?
+                    """,
+                    (now, run_id),
+                )
+            return inserted
 
     def persist_page(
         self,
@@ -217,7 +286,10 @@ class IndexStore:
             self._conn.execute(
                 """
                 UPDATE crawl_runs
-                SET processed_count = processed_count + 1, updated_at=?
+                SET
+                    processed_count = processed_count + 1,
+                    urls_processed = urls_processed + 1,
+                    updated_at=?
                 WHERE run_id=?
                 """,
                 (time.time(), run_id),
@@ -264,44 +336,185 @@ class IndexStore:
                 run_ids.append(text)
         return run_ids
 
-    def get_search_rows(self, terms: list[str], limit: int) -> list[sqlite3.Row]:
+    def get_search_rows(self, terms: list[str], limit: int, run_id: str | None = None) -> list[sqlite3.Row]:
         if not terms:
             return []
         placeholders = ",".join(["?"] * len(terms))
+        where_clause = f"WHERE t.term IN ({placeholders})"
+        values: list[object] = list(terms)
+        if run_id:
+            where_clause += " AND p.run_id=?"
+            values.append(run_id)
         query = f"""
-            SELECT p.url AS relevant_url, p.origin_url, p.depth, p.title, p.snippet, t.term, pt.freq
+            SELECT
+                p.run_id, p.url AS relevant_url, p.origin_url, p.depth, p.title, p.snippet, t.term, pt.freq
             FROM pages p
             JOIN page_terms pt ON pt.page_id = p.page_id
             JOIN terms t ON t.term_id = pt.term_id
-            WHERE t.term IN ({placeholders})
+            {where_clause}
         """
-        rows = self._conn.execute(query, terms).fetchall()
+        rows = self._conn.execute(query, values).fetchall()
         return rows[: max(limit * 20, limit)]
 
-    def get_status_snapshot(self) -> dict:
+    def get_status_snapshot(self, run_id: str | None = None) -> dict:
+        run_filter = ""
+        run_values: list[object] = []
+        if run_id:
+            run_filter = " AND run_id=?"
+            run_values = [run_id]
+
         row = self._conn.execute(
-            """
+            f"""
             SELECT
-                (SELECT COUNT(*) FROM crawl_runs WHERE status='active') AS active_runs,
-                (SELECT COUNT(*) FROM visited) AS visited_urls,
-                (SELECT COUNT(*) FROM pages) AS indexed_pages,
-                (SELECT COUNT(*) FROM frontier WHERE status='queued') AS queued_items,
-                (SELECT COUNT(*) FROM frontier WHERE status='in_progress') AS in_progress_items,
-                (SELECT COUNT(*) FROM dead_letters) AS dead_letters
-            """
+                (SELECT COUNT(*) FROM crawl_runs WHERE status='active'{" AND run_id=?" if run_id else ""}) AS active_runs,
+                (SELECT COUNT(*) FROM visited WHERE 1=1{run_filter}) AS visited_urls,
+                (SELECT COUNT(*) FROM pages WHERE 1=1{run_filter}) AS indexed_pages,
+                (SELECT COUNT(*) FROM frontier WHERE status='queued'{run_filter}) AS queued_items,
+                (SELECT COUNT(*) FROM frontier WHERE status='in_progress'{run_filter}) AS in_progress_items,
+                (SELECT COUNT(*) FROM dead_letters WHERE 1=1{run_filter}) AS dead_letters
+            """,
+            (
+                ([run_id] if run_id else [])
+                + run_values
+                + run_values
+                + run_values
+                + run_values
+                + run_values
+            ),
         ).fetchone()
 
         per_run_rows = self._conn.execute(
-            """
+            f"""
             SELECT run_id, origin_url, max_depth, status, processed_count, created_at, updated_at
             FROM crawl_runs
+            {"WHERE run_id=?" if run_id else ""}
             ORDER BY created_at DESC
-            """
+            """,
+            (run_id,) if run_id else (),
         ).fetchall()
         return {
             "global": dict(row) if row else {},
             "runs": [dict(item) for item in per_run_rows],
         }
+
+    def get_run_frontier_counts(self) -> dict[str, dict[str, int]]:
+        rows = self._conn.execute(
+            """
+            SELECT run_id, status, COUNT(*) AS count
+            FROM frontier
+            GROUP BY run_id, status
+            """
+        ).fetchall()
+        result: dict[str, dict[str, int]] = {}
+        for row in rows:
+            run_id = str(row["run_id"])
+            result.setdefault(run_id, {"queued": 0, "in_progress": 0, "done": 0, "failed": 0})
+            result[run_id][str(row["status"])] = int(row["count"])
+        return result
+
+    def delete_run(self, run_id: str) -> bool:
+        with self._write_lock, self._conn:
+            cur = self._conn.execute("DELETE FROM crawl_runs WHERE run_id=?", (run_id,))
+        return cur.rowcount > 0
+
+    def run_statistics(self, run_id: str | None = None) -> dict:
+        values: list[object] = []
+        run_clause = ""
+        if run_id:
+            run_clause = "WHERE p.run_id=?"
+            values = [run_id]
+
+        depth_rows = self._conn.execute(
+            f"""
+            SELECT p.run_id, p.depth, COUNT(*) AS count
+            FROM pages p
+            {run_clause}
+            GROUP BY p.run_id, p.depth
+            ORDER BY p.run_id, p.depth
+            """,
+            values,
+        ).fetchall()
+
+        domain_rows = self._conn.execute(
+            f"""
+            SELECT p.run_id, p.url
+            FROM pages p
+            {run_clause}
+            LIMIT 5000
+            """,
+            values,
+        ).fetchall()
+        domains: dict[str, dict[str, int]] = {}
+        for row in domain_rows:
+            row_run_id = str(row["run_id"])
+            domain = urlparse(str(row["url"])).netloc or "unknown"
+            domains.setdefault(row_run_id, {})
+            domains[row_run_id][domain] = domains[row_run_id].get(domain, 0) + 1
+
+        term_rows = self._conn.execute(
+            f"""
+            SELECT p.run_id, t.term, SUM(pt.freq) AS total_freq
+            FROM page_terms pt
+            JOIN pages p ON p.page_id=pt.page_id
+            JOIN terms t ON t.term_id=pt.term_id
+            {"WHERE p.run_id=?" if run_id else ""}
+            GROUP BY p.run_id, t.term
+            ORDER BY total_freq DESC
+            LIMIT 50
+            """,
+            [run_id] if run_id else [],
+        ).fetchall()
+
+        failure_rows = self._conn.execute(
+            """
+            SELECT run_id, COUNT(*) AS dead_letters
+            FROM dead_letters
+            GROUP BY run_id
+            """
+        ).fetchall()
+
+        by_run: dict[str, dict] = {}
+        for run in self.list_runs():
+            by_run[str(run["run_id"])] = {
+                "summary": run,
+                "depth_distribution": [],
+                "top_domains": [],
+                "top_terms": [],
+                "dead_letters": 0,
+            }
+
+        for row in depth_rows:
+            row_run_id = str(row["run_id"])
+            if row_run_id in by_run:
+                by_run[row_run_id]["depth_distribution"].append(
+                    {"depth": int(row["depth"]), "count": int(row["count"])}
+                )
+
+        for row_run_id, domain_counts in domains.items():
+            if row_run_id in by_run:
+                by_run[row_run_id]["top_domains"] = [
+                    {"domain": domain, "count": count}
+                    for domain, count in sorted(domain_counts.items(), key=lambda item: item[1], reverse=True)[:10]
+                ]
+
+        grouped_terms: dict[str, list[dict]] = {}
+        for row in term_rows:
+            row_run_id = str(row["run_id"])
+            grouped_terms.setdefault(row_run_id, []).append(
+                {"term": str(row["term"]), "count": int(row["total_freq"])}
+            )
+        for row_run_id, terms in grouped_terms.items():
+            if row_run_id in by_run:
+                by_run[row_run_id]["top_terms"] = terms[:10]
+
+        for row in failure_rows:
+            row_run_id = str(row["run_id"])
+            if row_run_id in by_run:
+                by_run[row_run_id]["dead_letters"] = int(row["dead_letters"])
+
+        if run_id:
+            return by_run.get(run_id, {})
+        return {"runs": list(by_run.values())}
 
     def close(self) -> None:
         self._conn.close()

@@ -1,0 +1,54 @@
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: "Segoe UI", Arial, sans-serif;
+  background: linear-gradient(135deg, #111827, #1f2937 45%, #0f172a);
+  color: #e5e7eb;
+}
+a { color: inherit; text-decoration: none; }
+.layout { max-width: 1200px; margin: 0 auto; padding: 20px; }
+.topbar {
+  display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;
+}
+.brand { font-size: 22px; font-weight: 700; }
+.nav { display: flex; gap: 10px; }
+.nav a {
+  background: #1f2937; padding: 10px 14px; border-radius: 10px; border: 1px solid #334155;
+}
+.nav a.active { border-color: #22d3ee; color: #67e8f9; }
+.card {
+  background: rgba(17, 24, 39, 0.85);
+  border: 1px solid #374151;
+  border-radius: 14px;
+  padding: 16px;
+  margin-bottom: 14px;
+  backdrop-filter: blur(6px);
+}
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.metric { background: #0f172a; border: 1px solid #334155; border-radius: 10px; padding: 12px; }
+.metric .label { color: #9ca3af; font-size: 12px; }
+.metric .value { font-size: 22px; font-weight: 700; margin-top: 4px; }
+input, select {
+  width: 100%; padding: 10px; border-radius: 9px; border: 1px solid #475569;
+  background: #0b1220; color: #f3f4f6; margin-top: 4px;
+}
+button {
+  border: 1px solid #0ea5e9; background: #0284c7; color: #ecfeff;
+  padding: 10px 14px; border-radius: 9px; cursor: pointer; font-weight: 600;
+}
+button.alt { background: #334155; border-color: #475569; }
+button.warn { background: #7f1d1d; border-color: #ef4444; }
+.row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+.table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.table th, .table td { border-bottom: 1px solid #334155; padding: 9px; text-align: left; }
+.table th { color: #93c5fd; }
+.pill { padding: 4px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+.pill.active { background: #14532d; color: #86efac; }
+.pill.paused { background: #78350f; color: #fcd34d; }
+.pill.completed { background: #1e3a8a; color: #93c5fd; }
+.pill.failed { background: #7f1d1d; color: #fca5a5; }
+.muted { color: #94a3b8; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.result-list { display: grid; gap: 8px; }
+.result-item { border: 1px solid #334155; padding: 10px; border-radius: 10px; background: #0b1220; }

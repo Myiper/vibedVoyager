@@ -32,7 +32,9 @@ def main() -> None:
         burst=args.burst,
     )
     manager.start()
-    server = NativeSearchServer(manager=manager, host=args.host, port=args.port, web_root=root / "web")
+    frontend_dist = root / "frontend" / "dist"
+    web_root = frontend_dist if frontend_dist.exists() else root / "web"
+    server = NativeSearchServer(manager=manager, host=args.host, port=args.port, web_root=web_root)
     print(f"Native-Search running at http://{args.host}:{args.port}")
     try:
         server.start(blocking=True)

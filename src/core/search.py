@@ -10,12 +10,12 @@ class SearchEngine:
     def __init__(self, store: IndexStore) -> None:
         self._store = store
 
-    def search(self, query: str, limit: int = 50) -> list[tuple[str, str, int]]:
+    def search(self, query: str, limit: int = 50, run_id: str | None = None) -> list[tuple[str, str, int]]:
         terms = tokenize(query)
         if not terms:
             return []
 
-        rows = self._store.get_search_rows(terms=terms, limit=limit)
+        rows = self._store.get_search_rows(terms=terms, limit=limit, run_id=run_id)
         scored: dict[tuple[str, str, int], float] = defaultdict(float)
 
         for row in rows:

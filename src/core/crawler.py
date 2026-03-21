@@ -3,6 +3,7 @@ from __future__ import annotations
 import queue
 import threading
 import time
+from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -16,6 +17,17 @@ from .utils import normalize_url
 
 
 USER_AGENT = "NativeSearchCrawler/1.0"
+
+
+@dataclass
+class RunContext:
+    run_id: str
+    hit_rate: float
+    queue_capacity: int
+    max_urls: int
+    limiter: TokenBucketRateLimiter
+    paused: bool = False
+    backpressure_events: int = 0
 
 
 class CrawlManager:
@@ -38,12 +50,13 @@ class CrawlManager:
         self._workers: list[threading.Thread] = []
         self._workers_count = workers
         self._stop_event = threading.Event()
-        self._paused_event = threading.Event()
         self._visited_lock = threading.Lock()
         self._visited: set[tuple[str, str]] = set()
         self._active_jobs = 0
         self._active_jobs_lock = threading.Lock()
-        self._backpressure_count = 0
+        self._run_contexts: dict[str, RunContext] = {}
+        self._default_rps = requests_per_second
+        self._default_queue_capacity = queue_maxsize
         self._booted = False
 
     def start(self) -> None:
@@ -62,17 +75,45 @@ class CrawlManager:
             thread.join(timeout=1.0)
         self._workers.clear()
 
-    def pause(self) -> None:
-        self._paused_event.set()
+    def pause(self, run_id: str) -> None:
+        context = self._run_contexts.get(run_id)
+        if context is not None:
+            context.paused = True
+            self._store.mark_run_status(run_id, "paused")
 
-    def resume(self) -> None:
-        self._paused_event.clear()
+    def resume(self, run_id: str) -> None:
+        context = self._run_contexts.get(run_id)
+        if context is not None:
+            context.paused = False
+            self._store.mark_run_status(run_id, "active")
 
-    def start_index(self, origin: str, max_depth: int) -> str:
+    def start_index(
+        self,
+        origin: str,
+        max_depth: int,
+        hit_rate: float | None = None,
+        queue_capacity: int | None = None,
+        max_urls: int = 10000,
+    ) -> str:
         normalized = normalize_url(origin)
         if not normalized:
             raise ValueError("origin must be a valid http/https URL")
-        run_id = self._store.create_run(normalized, max_depth)
+        effective_hit_rate = hit_rate if hit_rate is not None else self._default_rps
+        effective_queue_capacity = queue_capacity if queue_capacity is not None else self._default_queue_capacity
+        run_id = self._store.create_run(
+            normalized,
+            max_depth,
+            hit_rate=effective_hit_rate,
+            queue_capacity=effective_queue_capacity,
+            max_urls=max_urls,
+        )
+        self._run_contexts[run_id] = RunContext(
+            run_id=run_id,
+            hit_rate=effective_hit_rate,
+            queue_capacity=effective_queue_capacity,
+            max_urls=max_urls,
+            limiter=TokenBucketRateLimiter(rate_per_sec=effective_hit_rate, burst=max(1, int(effective_hit_rate * 2))),
+        )
         self._enqueue_if_new(
             CrawlTask(
                 run_id=run_id,
@@ -84,25 +125,66 @@ class CrawlManager:
         )
         return run_id
 
-    def search(self, query: str, limit: int = 50) -> list[tuple[str, str, int]]:
-        return self._search.search(query=query, limit=limit)
+    def search(self, query: str, limit: int = 50, run_id: str | None = None) -> list[tuple[str, str, int]]:
+        return self._search.search(query=query, limit=limit, run_id=run_id)
 
-    def status(self) -> dict[str, Any]:
+    def status(self, run_id: str | None = None) -> dict[str, Any]:
         with self._active_jobs_lock:
             active_jobs = self._active_jobs
-        snapshot = self._store.get_status_snapshot()
+        snapshot = self._store.get_status_snapshot(run_id=run_id)
+        frontier_counts = self._store.get_run_frontier_counts()
+        for run in snapshot.get("runs", []):
+            counts = frontier_counts.get(str(run["run_id"]), {})
+            run["frontier"] = counts
+            context = self._run_contexts.get(str(run["run_id"]))
+            run["runtime"] = {
+                "is_paused": bool(context.paused) if context else False,
+                "is_throttled": bool(context.limiter.throttled) if context else False,
+                "backpressure_events": int(context.backpressure_events) if context else 0,
+            }
         snapshot["runtime"] = {
             "queue_depth": self._queue.qsize(),
             "queue_maxsize": self._queue.maxsize,
             "active_workers": active_jobs,
             "worker_count": self._workers_count,
-            "is_paused": self._paused_event.is_set(),
-            "is_throttled": self._rate_limiter.throttled,
-            "backpressure_events": self._backpressure_count,
         }
         return snapshot
 
+    def list_runs(self) -> list[dict]:
+        runs = self._store.list_runs()
+        frontier_counts = self._store.get_run_frontier_counts()
+        for run in runs:
+            run["frontier"] = frontier_counts.get(str(run["run_id"]), {"queued": 0, "in_progress": 0, "done": 0, "failed": 0})
+        return runs
+
+    def delete_run(self, run_id: str) -> bool:
+        run = self._store.get_run(run_id)
+        if not run:
+            return False
+        if run["status"] in {"active", "paused"}:
+            raise ValueError("active or paused runs cannot be deleted")
+        self._run_contexts.pop(run_id, None)
+        with self._visited_lock:
+            self._visited = {item for item in self._visited if item[0] != run_id}
+        return self._store.delete_run(run_id)
+
+    def run_statistics(self, run_id: str | None = None) -> dict:
+        return self._store.run_statistics(run_id=run_id)
+
     def _restore_recovery_state(self) -> None:
+        for run in self._store.list_runs():
+            if run["status"] in {"active", "paused"}:
+                paused = str(run["status"]) == "paused"
+                self._run_contexts[str(run["run_id"])] = RunContext(
+                    run_id=str(run["run_id"]),
+                    hit_rate=float(run["hit_rate"]),
+                    queue_capacity=int(run["queue_capacity"]),
+                    max_urls=int(run["max_urls"]),
+                    limiter=TokenBucketRateLimiter(
+                        rate_per_sec=float(run["hit_rate"]), burst=max(1, int(float(run["hit_rate"]) * 2))
+                    ),
+                    paused=paused,
+                )
         for job in self._store.load_active_frontier():
             task = CrawlTask(
                 run_id=str(job["run_id"]),
@@ -115,6 +197,18 @@ class CrawlManager:
             self._mark_visited_in_memory(task.run_id, task.url)
 
     def _enqueue_if_new(self, task: CrawlTask) -> bool:
+        context = self._run_contexts.get(task.run_id)
+        if context is None:
+            return False
+        run_data = self._store.get_run(task.run_id)
+        if run_data is None:
+            return False
+        if int(run_data["urls_discovered"]) >= context.max_urls:
+            return False
+        if self._run_queued_items(task.run_id) >= context.queue_capacity:
+            context.backpressure_events += 1
+            return False
+
         with self._visited_lock:
             key = (task.run_id, task.url)
             if key in self._visited:
@@ -140,14 +234,13 @@ class CrawlManager:
                 self._queue.put(task, timeout=0.1)
                 return
             except queue.Full:
-                self._backpressure_count += 1
+                context = self._run_contexts.get(task.run_id)
+                if context is not None:
+                    context.backpressure_events += 1
                 time.sleep(0.05)
 
     def _worker_loop(self) -> None:
         while not self._stop_event.is_set():
-            if self._paused_event.is_set():
-                time.sleep(0.1)
-                continue
             try:
                 task = self._queue.get(timeout=0.1)
             except queue.Empty:
@@ -173,7 +266,16 @@ class CrawlManager:
                 self._queue.task_done()
 
     def _process_task(self, task: CrawlTask) -> None:
-        html, page_url = self._fetch_html(task.url)
+        context = self._run_contexts.get(task.run_id)
+        if context is None:
+            return
+        if context.paused:
+            self._store.mark_frontier_state(task.run_id, task.url, "queued")
+            self._enqueue_task(task)
+            time.sleep(0.05)
+            return
+
+        html, page_url = self._fetch_html_for_task(task)
         parser = HTMLLinkParser()
         parser.feed(html)
         title = parser.title or page_url
@@ -204,13 +306,16 @@ class CrawlManager:
             )
             self._enqueue_if_new(child)
 
-    def _fetch_html(self, url: str) -> tuple[str, str]:
+    def _fetch_html_for_task(self, task: CrawlTask) -> tuple[str, str]:
+        context = self._run_contexts.get(task.run_id)
+        if context is None:
+            raise RuntimeError(f"missing run context: {task.run_id}")
         attempt = 0
         last_exc: Exception | None = None
         while attempt <= self._max_retries:
             try:
-                self._rate_limiter.acquire()
-                request = Request(url=url, headers={"User-Agent": USER_AGENT})
+                context.limiter.acquire()
+                request = Request(url=task.url, headers={"User-Agent": USER_AGENT})
                 with urlopen(request, timeout=self._request_timeout) as response:
                     content_type = response.headers.get("Content-Type", "")
                     if "text/html" not in content_type:
@@ -218,7 +323,7 @@ class CrawlManager:
                     encoding = response.headers.get_content_charset() or "utf-8"
                     raw = response.read()
                     html = raw.decode(encoding, errors="replace")
-                    final_url = normalize_url(response.geturl()) or url
+                    final_url = normalize_url(response.geturl()) or task.url
                     return html, final_url
             except (HTTPError, URLError, TimeoutError, ValueError) as exc:
                 last_exc = exc
@@ -226,7 +331,7 @@ class CrawlManager:
                     break
                 time.sleep(0.25 * (2**attempt))
                 attempt += 1
-        raise RuntimeError(f"fetch failed for {url}: {last_exc}")
+        raise RuntimeError(f"fetch failed for {task.url}: {last_exc}")
 
     def _extract_text(self, html: str) -> str:
         cleaned = []
@@ -249,15 +354,24 @@ class CrawlManager:
         return " ".join(" ".join(cleaned).split())
 
     def _check_run_completion(self) -> None:
-        if not self._store.active_run_ids():
+        run_ids = self._store.active_run_ids()
+        if not run_ids:
             return
-        snapshot = self._store.get_status_snapshot()
-        global_status = snapshot.get("global", {})
-        queued_items = int(global_status.get("queued_items", 0))
-        in_progress_items = int(global_status.get("in_progress_items", 0))
-        with self._active_jobs_lock:
-            active = self._active_jobs
-        if queued_items == 0 and in_progress_items == 0 and active == 0 and self._queue.empty():
-            for run_id in self._store.active_run_ids():
+        frontier_counts = self._store.get_run_frontier_counts()
+        for run_id in run_ids:
+            counts = frontier_counts.get(run_id, {})
+            queued_items = int(counts.get("queued", 0))
+            in_progress_items = int(counts.get("in_progress", 0))
+            has_buffered = self._has_buffered_tasks(run_id)
+            if queued_items == 0 and in_progress_items == 0 and not has_buffered:
                 self._store.mark_run_status(run_id, "completed")
+                self._run_contexts.pop(run_id, None)
+
+    def _run_queued_items(self, run_id: str) -> int:
+        counts = self._store.get_run_frontier_counts().get(run_id, {})
+        return int(counts.get("queued", 0)) + int(counts.get("in_progress", 0))
+
+    def _has_buffered_tasks(self, run_id: str) -> bool:
+        with self._queue.mutex:
+            return any(task.run_id == run_id for task in list(self._queue.queue))
 
