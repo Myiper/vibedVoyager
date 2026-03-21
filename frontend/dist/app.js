@@ -67,6 +67,7 @@ function StartPage({ onRunCreated }) {
       });
       setMessage(`Run started: ${payload.run_id}`);
       onRunCreated();
+      window.location.hash = "/status";
     } catch (err) {
       setMessage(err.message);
     }
