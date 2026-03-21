@@ -212,6 +212,6 @@ __marimo__/
 data/*.db
 data/*.db-wal
 data/*.db-shm
-
+/data/native_search.db
 .vscode
 /data/
