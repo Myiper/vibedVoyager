@@ -17,6 +17,22 @@ function useInterval(callback, delay) {
   }, [callback, delay]);
 }
 
+function toNonNegativeInteger(value, fallback) {
+  const parsed = Number.parseInt(String(value), 10);
+  if (Number.isNaN(parsed) || parsed < 0) return fallback;
+  return parsed;
+}
+
+function loadStoredInteger(key, fallback) {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (raw === null) return fallback;
+    return toNonNegativeInteger(raw, fallback);
+  } catch (_err) {
+    return fallback;
+  }
+}
+
 function StatusPill({ status }) {
   const className = `pill ${status || ""}`;
   return e("span", { className }, status || "unknown");
@@ -24,11 +40,22 @@ function StatusPill({ status }) {
 
 function StartPage({ onRunCreated }) {
   const [origin, setOrigin] = React.useState("");
-  const [k, setK] = React.useState(2);
-  const [hitRate, setHitRate] = React.useState(5);
-  const [queueCapacity, setQueueCapacity] = React.useState(5000);
-  const [maxUrls, setMaxUrls] = React.useState(10000);
+  const [k, setK] = React.useState(() => loadStoredInteger("start.depth", 2));
+  const [hitRate, setHitRate] = React.useState(() => loadStoredInteger("start.hitRate", 5));
+  const [queueCapacity, setQueueCapacity] = React.useState(() => loadStoredInteger("start.queueCapacity", 5000));
+  const [maxUrls, setMaxUrls] = React.useState(() => loadStoredInteger("start.maxUrls", 10000));
   const [message, setMessage] = React.useState("");
+
+  React.useEffect(() => {
+    try {
+      window.localStorage.setItem("start.depth", String(k));
+      window.localStorage.setItem("start.hitRate", String(hitRate));
+      window.localStorage.setItem("start.queueCapacity", String(queueCapacity));
+      window.localStorage.setItem("start.maxUrls", String(maxUrls));
+    } catch (_err) {
+      // Ignore storage failures (private mode or blocked storage).
+    }
+  }, [k, hitRate, queueCapacity, maxUrls]);
 
   async function submit(event) {
     event.preventDefault();
@@ -53,10 +80,46 @@ function StartPage({ onRunCreated }) {
       { onSubmit: submit, key: "form" },
       e("div", { className: "row3" }, [
         e("label", { key: "origin" }, ["Origin URL", e("input", { value: origin, onChange: (x) => setOrigin(x.target.value), required: true })]),
-        e("label", { key: "k" }, ["Depth (k)", e("input", { type: "number", min: 0, value: k, onChange: (x) => setK(Number(x.target.value)) })]),
-        e("label", { key: "rate" }, ["Hit Rate (req/s)", e("input", { type: "number", step: 0.1, min: 0.1, value: hitRate, onChange: (x) => setHitRate(Number(x.target.value)) })]),
-        e("label", { key: "queue" }, ["Queue Capacity", e("input", { type: "number", min: 1, value: queueCapacity, onChange: (x) => setQueueCapacity(Number(x.target.value)) })]),
-        e("label", { key: "max" }, ["Max URLs", e("input", { type: "number", min: 1, value: maxUrls, onChange: (x) => setMaxUrls(Number(x.target.value)) })]),
+        e("label", { key: "k" }, [
+          "Depth (k)",
+          e("input", {
+            type: "number",
+            min: 0,
+            step: 1,
+            value: k,
+            onChange: (x) => setK(toNonNegativeInteger(x.target.value, 0)),
+          }),
+        ]),
+        e("label", { key: "rate" }, [
+          "Hit Rate (req/s)",
+          e("input", {
+            type: "number",
+            min: 0,
+            step: 1,
+            value: hitRate,
+            onChange: (x) => setHitRate(toNonNegativeInteger(x.target.value, 0)),
+          }),
+        ]),
+        e("label", { key: "queue" }, [
+          "Queue Capacity",
+          e("input", {
+            type: "number",
+            min: 0,
+            step: 1,
+            value: queueCapacity,
+            onChange: (x) => setQueueCapacity(toNonNegativeInteger(x.target.value, 0)),
+          }),
+        ]),
+        e("label", { key: "max" }, [
+          "Max URLs",
+          e("input", {
+            type: "number",
+            min: 0,
+            step: 1,
+            value: maxUrls,
+            onChange: (x) => setMaxUrls(toNonNegativeInteger(x.target.value, 0)),
+          }),
+        ]),
       ]),
       e("div", { style: { marginTop: "12px" } }, e("button", { type: "submit" }, "Start Indexing"))
     ),
