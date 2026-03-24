@@ -128,7 +128,7 @@ class CrawlManager:
         )
         return run_id
 
-    def search(self, query: str, limit: int = 50, run_id: str | None = None) -> list[tuple[str, str, int]]:
+    def search(self, query: str, limit: int = 50, run_id: str | None = None) -> list[tuple[str, str, int, float, int]]:
         return self._search.search(query=query, limit=limit, run_id=run_id)
 
     def status(self, run_id: str | None = None) -> dict[str, Any]:

@@ -201,6 +201,7 @@ Search indexed pages.
 - default scope: all runs
 - optional `run_id` filter
 - `limit` is clamped to `1..200`
+- each result returns: `relevant_url`, `origin_url`, `depth`, `relevance_score`, `matched_term_frequency`
 
 Success:
 
@@ -209,7 +210,7 @@ Success:
   "query": "example",
   "run_id": null,
   "results": [
-    ["https://example.com/page","https://example.com",1]
+    ["https://example.com/page","https://example.com",1,7.5,4]
   ]
 }
 ```
