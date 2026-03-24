@@ -209,10 +209,8 @@ marimo/_lsp/
 __marimo__/
 
 # Native-Search runtime data
-data/*.db
-data/*.db-wal
-data/*.db-shm
-/data/native_search.db
+
+
 .vscode
-/data/
+
 .cursor/
